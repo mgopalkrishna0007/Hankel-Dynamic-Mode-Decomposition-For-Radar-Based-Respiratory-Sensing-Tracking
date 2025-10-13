@@ -1,6 +1,6 @@
+HDMD README
+
 This repository contains the implementation of Hankel Dynamic Mode Decomposition (Hankel-DMD) for radar-based respiratory sensing and tracking using the Acconeer A121 radar sensor.
-
-
 
 Installation
 Prerequisites
@@ -74,12 +74,3 @@ Receiver gain: 16
 PRF: 15.6 MHz
 Enable transmitter: ✓
 
-
-Usage
-[To be added: Instructions for running your code, data collection, processing, and analysis]
-bash# Example usage commands will go here
-
-
-
-📧 Contact
-For questions or issues, please open an issue on this repository or contact [your email].RetryClaude can make mistakes. Please double-check responses.
