@@ -30,7 +30,7 @@ duration_desired = 60  # Desired duration in seconds
 # ---------------------------
 # Load radar data
 # ---------------------------
-file_path = r"c:\Users\GOPAL\neurips dataset\ICU TEST\t1.h5"
+file_path = r"c:\Users\GOPAL\neurips dataset\ICU TEST\i1.h5"
 
 with h5py.File(file_path, "r") as f:
     frame = f["sessions/session_0/group_0/entry_0/result/frame"]
@@ -266,265 +266,69 @@ print(f"  - Mode frequencies: {[f'{frequencies[i]:.3f} Hz' for i in selected_res
 # =============================================
 # 2. EMPIRICAL MODE DECOMPOSITION (EMD)
 # =============================================
+
 print("\n" + "="*50)
-print("2. EMPIRICAL MODE DECOMPOSITION (EMD)")
+print("2. ENSEMBLE EMPIRICAL MODE DECOMPOSITION (EEMD)")
 print("="*50)
 
-def emd_simple(signal, max_imfs=10):
-    """Simple implementation of Empirical Mode Decomposition (EMD)"""
-    imfs = []
-    residue = signal.copy()
+from PyEMD import EEMD
+import numpy as np
+from scipy.signal import welch
+import time
+
+# =========================================================
+# Function to apply EEMD and extract the respiration signal
+# =========================================================
+def extract_respiration_eemd(signal, fs):
+    """Apply EEMD and extract the dominant respiration-related IMF"""
+    eemd = EEMD()
+    imfs = eemd(signal)
     
-    for i in range(max_imfs):
-        # Extract IMF
-        imf = extract_imf(residue)
-        
-        # Check stopping criteria
-        if np.sum(np.abs(imf)) < 1e-6 * np.sum(np.abs(signal)):
-            break
-            
-        imfs.append(imf)
-        residue = residue - imf
-        
-        # Check if residue is monotonic (final residue)
-        if is_monotonic(residue):
-            break
-    
-    imfs.append(residue)  # Add final residue
-    return np.array(imfs)
+    breathing_freq_range = [0.1, 0.8]  # Hz
+    imf_freqs = []
+    imf_powers = []
 
-def extract_imf(signal, max_iterations=10):
-    """Extract a single Intrinsic Mode Function"""
-    h = signal.copy()
-    
-    for _ in range(max_iterations):
-        # Find local maxima and minima
-        maxima_idx = find_peaks(h)
-        minima_idx = find_peaks(-h)
-        
-        if len(maxima_idx) < 2 or len(minima_idx) < 2:
-            break
-            
-        # Create envelopes
-        upper_env = interpolate_envelope(np.arange(len(h)), h, maxima_idx)
-        lower_env = interpolate_envelope(np.arange(len(h)), h, minima_idx)
-        
-        # Calculate mean
-        mean_env = (upper_env + lower_env) / 2
-        
-        # Update h
-        h_new = h - mean_env
-        
-        # Check stopping criterion
-        if np.sum((h - h_new)**2) / np.sum(h**2) < 0.01:
-            break
-            
-        h = h_new
-    
-    return h
-
-def find_peaks(signal):
-    """Simple peak finding"""
-    peaks = []
-    for i in range(1, len(signal)-1):
-        if signal[i] > signal[i-1] and signal[i] > signal[i+1]:
-            peaks.append(i)
-    return np.array(peaks)
-
-def interpolate_envelope(x, signal, peak_indices):
-    """Simple linear interpolation for envelope"""
-    if len(peak_indices) < 2:
-        return np.zeros_like(signal)
-    
-    # Extend peaks to boundaries
-    extended_indices = np.concatenate([[0], peak_indices, [len(signal)-1]])
-    extended_values = np.concatenate([[signal[0]], signal[peak_indices], [signal[-1]]])
-    
-    return np.interp(x, extended_indices, extended_values)
-
-def is_monotonic(signal):
-    """Check if signal is monotonic"""
-    diff = np.diff(signal)
-    return np.all(diff >= 0) or np.all(diff <= 0)
-
-# Apply EMD with timing
-start_time = time.time()
-imfs_emd = emd_simple(phi, max_imfs=10)
-emd_time = time.time() - start_time
-
-print(f"EMD extracted {len(imfs_emd)} IMFs")
-
-# Analyze IMFs for breathing component and find dominant frequency
-selected_imfs = []
-breathing_freq_range = [0.1, 0.8]  # Hz
-imf_frequencies = []
-
-for i, imf in enumerate(imfs_emd[:-1]):  # Exclude residue
-    # Calculate dominant frequency using zero-crossing method (more accurate for IMFs)
-    zero_crossings = np.where(np.diff(np.sign(imf)))[0]
-    if len(zero_crossings) > 1:
-        avg_period = 2 * (zero_crossings[-1] - zero_crossings[0]) / (len(zero_crossings) - 1)
-        dominant_freq = fs / avg_period
-    else:
-        # Fallback to Welch for very low frequency components
+    # Compute dominant frequency of each IMF
+    for i, imf in enumerate(imfs):
         freqs, psd = welch(imf, fs=fs, nperseg=min(1024, len(imf)//4))
         dominant_freq = freqs[np.argmax(psd)]
-    
-    imf_frequencies.append(dominant_freq)
-    
-    # Check if in breathing frequency range
-    if breathing_freq_range[0] <= dominant_freq <= breathing_freq_range[1]:
-        selected_imfs.append(i)
+        imf_freqs.append(dominant_freq)
+        
+        # Compute power within breathing range
+        mask = (freqs >= breathing_freq_range[0]) & (freqs <= breathing_freq_range[1])
+        imf_power = np.trapz(psd[mask], freqs[mask])
+        imf_powers.append(imf_power)
 
-# If no IMFs found in breathing range, use the one closest to 0.3 Hz
-if not selected_imfs:
-    target_freq = 0.3  # Typical breathing frequency
-    freq_diffs = [abs(freq - target_freq) for freq in imf_frequencies]
-    closest_imf = np.argmin(freq_diffs)
-    selected_imfs = [closest_imf]
-    print(f"No IMF in breathing range, selecting IMF {closest_imf+1} with freq {imf_frequencies[closest_imf]:.3f} Hz")
+    # Find IMF with maximum power in breathing band
+    dominant_imf_index = np.argmax(imf_powers)
+    respiration_signal = imfs[dominant_imf_index]
 
-# Use the most dominant breathing IMF for rate calculation
-if selected_imfs:
-    dominant_imf_idx = selected_imfs[0]
-    breathing_rate_emd_hz = imf_frequencies[dominant_imf_idx]
-    breathing_rate_emd_bpm = breathing_rate_emd_hz * 60
-else:
-    breathing_rate_emd_hz = 0.2
-    breathing_rate_emd_bpm = 12
+    return respiration_signal, imfs, dominant_imf_index, imf_freqs
 
-# Reconstruct breathing signal from selected IMFs
-breathing_emd = np.sum([imfs_emd[i] for i in selected_imfs], axis=0)
+# Apply EEMD with timing
+start_time = time.time()
+breathing_emd, imfs_emd, dominant_imf_idx, imf_frequencies = extract_respiration_eemd(phi, fs)
+emd_time = time.time() - start_time
 
-print(f"\nEMD Results:")
+print(f"EEMD extracted {len(imfs_emd)} IMFs")
+
+# Analyze dominant IMF for breathing frequency
+freqs, psd = welch(breathing_emd, fs=fs, nperseg=min(1024, len(breathing_emd)//4))
+dominant_freq_idx = np.argmax(psd)
+breathing_rate_emd_hz = freqs[dominant_freq_idx]
+breathing_rate_emd_bpm = breathing_rate_emd_hz * 60
+
+# Check breathing range validity
+if not (0.1 <= breathing_rate_emd_hz <= 0.8):
+    print("Dominant frequency outside typical breathing range, adjusting to 0.3 Hz")
+    breathing_rate_emd_hz = 0.3
+    breathing_rate_emd_bpm = 18
+
+print(f"\nEEMD Results:")
 print(f"  - Computational time: {emd_time:.4f} seconds")
 print(f"  - Breathing rate: {breathing_rate_emd_hz:.3f} Hz ({breathing_rate_emd_bpm:.2f} BPM)")
-print(f"  - Selected IMFs: {[x+1 for x in selected_imfs]}")
-print(f"  - IMF frequencies: {[f'{imf_frequencies[i]:.3f} Hz' for i in selected_imfs]}")
-
-# # =============================================
-# # 3. VARIATIONAL MODE DECOMPOSITION (VMD)
-# # =============================================
-# print("\n" + "="*50)
-# print("3. VARIATIONAL MODE DECOMPOSITION (VMD)")
-# print("="*50)
-
-# def vmd_improved(signal, K=6, alpha=2000, tau=0, DC=False, init=1, tol=1e-6, max_iter=100):
-#     """Improved Variational Mode Decomposition implementation"""
-#     # Mirror extend signal to reduce boundary effects
-#     T = len(signal)
-#     f_mirror = np.concatenate([signal[:T//2][::-1], signal, signal[T//2:][::-1]])
-    
-#     # Time and frequency domains
-#     N = len(f_mirror)
-#     t = np.arange(N)
-#     freqs = np.fft.fftfreq(N)
-#     freqs = np.fft.fftshift(freqs)
-    
-#     # Initialize center frequencies
-#     omega = np.zeros(K)
-#     if init == 1:
-#         # Uniform distribution
-#         omega = np.linspace(0.05, 0.45, K)
-#     elif init == 2:
-#         # Initialize based on expected breathing frequencies
-#         omega[0] = 0.05   # Low frequency component
-#         omega[1] = 0.20   # First breathing frequency
-#         omega[2] = 0.25   # Second breathing frequency
-#         omega[3] = 0.30   # Third breathing frequency
-#         if K > 4:
-#             omega[4] = 0.35   # Higher breathing frequency
-#             omega[5] = 0.40   # High frequency component
-    
-#     # Initialize modes in frequency domain
-#     u_hat = np.zeros((K, N), dtype=complex)
-#     omega_old = omega.copy()
-    
-#     # Lagrange multiplier
-#     lambda_hat = np.zeros(N, dtype=complex)
-    
-#     # FFT of input
-#     f_hat = np.fft.fftshift(np.fft.fft(f_mirror))
-    
-#     # Main iteration loop
-#     n_iter = 0
-#     eps = 1e-9
-    
-#     while n_iter < max_iter:
-#         # Update modes
-#         for k in range(K):
-#             # Sum of all modes except k
-#             sum_uk = np.sum(u_hat, axis=0) - u_hat[k, :]
-            
-#             # Update mode k
-#             numerator = f_hat - sum_uk - lambda_hat / 2
-#             denominator = 1 + alpha * (freqs - omega[k])**2
-#             u_hat[k, :] = numerator / (denominator + eps)
-            
-#             # Update center frequency
-#             power_spectrum = np.abs(u_hat[k, :])**2
-#             omega[k] = np.sum(freqs * power_spectrum) / (np.sum(power_spectrum) + eps)
-#             omega[k] = np.clip(omega[k], 0, 0.5)  # Ensure valid frequency
-        
-#         # Update Lagrange multiplier
-#         residual = f_hat - np.sum(u_hat, axis=0)
-#         lambda_hat = lambda_hat + tau * residual
-        
-#         # Check convergence
-#         if n_iter > 0:
-#             omega_diff = np.sum(np.abs(omega - omega_old))
-#             if omega_diff < tol:
-#                 break
-        
-#         omega_old = omega.copy()
-#         n_iter += 1
-    
-#     print(f"VMD converged after {n_iter} iterations")
-    
-#     # Reconstruct modes in time domain
-#     u = np.zeros((K, T))
-#     for k in range(K):
-#         # IFFT and extract original signal length
-#         u_temp = np.real(np.fft.ifft(np.fft.ifftshift(u_hat[k, :])))
-#         u[k, :] = u_temp[T//2:T//2+T]  # Extract middle part
-    
-#     return u, omega
-
-# # Apply VMD with timing
-# start_time = time.time()
-# modes_vmd, omega_vmd = vmd_improved(phi, K=6, alpha=2000, init=2)
-# vmd_time = time.time() - start_time
-
-# print(f"VMD extracted {len(modes_vmd)} modes")
-# print(f"VMD center frequencies: {omega_vmd}")
-
-# # Select breathing modes based on VMD center frequencies
-# breathing_modes_vmd = [i for i, f in enumerate(omega_vmd) if 0.1 <= f <= 0.8]
-
-# # If no modes found, use the one closest to 0.3 Hz
-# if not breathing_modes_vmd:
-#     target_freq = 0.3  # Typical breathing frequency
-#     freq_diffs = [abs(freq - target_freq) for freq in omega_vmd]
-#     dominant_mode_idx = np.argmin(freq_diffs)
-#     print(f"No VMD mode in breathing range, selecting mode {dominant_mode_idx+1} with freq {omega_vmd[dominant_mode_idx]:.3f} Hz")
-# else:
-#     # Select the single dominant respiratory mode (with highest energy)
-#     mode_energies = [np.sum(np.square(modes_vmd[i, :])) for i in breathing_modes_vmd]
-#     dominant_mode_idx = breathing_modes_vmd[np.argmax(mode_energies)]
-
-# # Compute breathing rate from dominant mode
-# breathing_rate_vmd_hz = omega_vmd[dominant_mode_idx]
-# breathing_rate_vmd_bpm = breathing_rate_vmd_hz * 60
-
-# # Extract only the dominant respiratory mode
-# breathing_vmd = modes_vmd[dominant_mode_idx, :]
-
-# print(f"\nVMD Results:")
-# print(f"  - Computational time: {vmd_time:.4f} seconds")
-# print(f"  - Breathing rate: {breathing_rate_vmd_hz:.3f} Hz ({breathing_rate_vmd_bpm:.2f} BPM)")
-# print(f"  - Selected mode: {dominant_mode_idx+1}")
-# print(f"  - Mode center frequency: {omega_vmd[dominant_mode_idx]:.3f} Hz")
-
+print(f"  - Dominant IMF: {dominant_imf_idx+1}")
+print(f"  - Dominant IMF frequency: {imf_frequencies[dominant_imf_idx]:.3f} Hz")
 
 # =============================================
 # 3. VARIATIONAL MODE DECOMPOSITION (VMD)
@@ -842,108 +646,6 @@ if valid_rates:
 else:
     final_rate = breathing_rate_wavelet_bpm
     print(f"\nUsing advanced wavelet result: {final_rate:.2f} BPM")
-
-# print("\n" + "="*50)
-# print("4. WAVELET TRANSFORM")
-# print("="*50)
-
-# def analyze_wavelet_breathing(signal, wavelet='db4', max_level=10):
-#     """Improved wavelet analysis for breathing component extraction"""
-#     # Determine optimal decomposition level
-#     optimal_level = min(max_level, int(np.log2(len(signal))))
-#     print(f"Wavelet: Using {optimal_level} decomposition levels")
-    
-#     # Perform multilevel decomposition
-#     coeffs = pywt.wavedec(signal, wavelet, level=optimal_level)
-    
-#     # Analyze frequency content of each level
-#     breathing_freq_range = [0.1, 0.8]  # Hz
-#     selected_coeffs = [np.zeros_like(c) for c in coeffs]
-#     selected_levels = []
-#     level_frequencies = []
-    
-#     for i in range(len(coeffs)):
-#         # Calculate frequency band for this level
-#         if i == 0:  # Approximation coefficients (lowest frequencies)
-#             freq_low = 0
-#             freq_high = fs / (2 ** (optimal_level + 1))
-#             level_name = f"A{optimal_level}"
-#             center_freq = (freq_low + freq_high) / 2
-#         else:  # Detail coefficients
-#             level = optimal_level - i + 1
-#             freq_low = fs / (2 ** (level + 1))
-#             freq_high = fs / (2 ** level)
-#             level_name = f"D{level}"
-#             center_freq = (freq_low + freq_high) / 2
-        
-#         level_frequencies.append(center_freq)
-        
-#         # Check overlap with breathing frequency range
-#         overlap = not (freq_high < breathing_freq_range[0] or freq_low > breathing_freq_range[1])
-        
-#         if overlap:
-#             # Calculate energy in breathing frequency range for this level
-#             if len(coeffs[i]) > 0:
-#                 # Reconstruct this level alone to analyze its frequency content
-#                 test_coeffs = [np.zeros_like(c) for c in coeffs]
-#                 test_coeffs[i] = coeffs[i]
-#                 reconstructed_level = pywt.waverec(test_coeffs, wavelet)
-                
-#                 # Ensure same length
-#                 if len(reconstructed_level) != len(signal):
-#                     reconstructed_level = reconstructed_level[:len(signal)]
-                
-#                 # Analyze frequency content using PSD
-#                 freqs_psd, psd = welch(reconstructed_level, fs=fs, 
-#                                      nperseg=min(1024, len(reconstructed_level)//4))
-                
-#                 # Calculate energy in breathing frequency band
-#                 breathing_mask = (freqs_psd >= breathing_freq_range[0]) & (freqs_psd <= breathing_freq_range[1])
-#                 breathing_energy = np.sum(psd[breathing_mask])
-#                 total_energy = np.sum(psd)
-                
-#                 breathing_ratio = breathing_energy / (total_energy + 1e-10)
-                
-#                 # Select level if significant breathing energy (threshold = 0.1)
-#                 if breathing_ratio > 0.1:
-#                     selected_coeffs[i] = coeffs[i]
-#                     selected_levels.append((level_name, center_freq))
-    
-#     # Find the level with center frequency closest to typical breathing (0.3 Hz)
-#     breathing_levels = [level for level in selected_levels if 0.1 <= level[1] <= 0.8]
-#     if breathing_levels:
-#         # Use the level with center frequency closest to 0.3 Hz
-#         target_freq = 0.3
-#         freq_diffs = [abs(level[1] - target_freq) for level in breathing_levels]
-#         best_level_idx = np.argmin(freq_diffs)
-#         breathing_rate_wavelet_hz = breathing_levels[best_level_idx][1]
-#         breathing_level_name = breathing_levels[best_level_idx][0]
-#     else:
-#         # Fallback: use D4 level (typical for breathing)
-#         breathing_rate_wavelet_hz = 0.3
-#         breathing_level_name = "D4"
-#         print("No optimal breathing level found, using D4 as fallback")
-    
-#     # Reconstruct breathing signal from selected coefficients
-#     breathing_reconstructed = pywt.waverec(selected_coeffs, wavelet)
-    
-#     # Ensure same length as original signal
-#     if len(breathing_reconstructed) != len(signal):
-#         breathing_reconstructed = breathing_reconstructed[:len(signal)]
-    
-#     return breathing_reconstructed, breathing_level_name, breathing_rate_wavelet_hz
-
-# # Apply improved wavelet analysis with timing
-# start_time = time.time()
-# breathing_wavelet, wavelet_level, breathing_rate_wavelet_hz = analyze_wavelet_breathing(phi, wavelet='db4', max_level=10)
-# wavelet_time = time.time() - start_time
-
-# breathing_rate_wavelet_bpm = breathing_rate_wavelet_hz * 60
-
-# print(f"\nWavelet Transform Results:")
-# print(f"  - Computational time: {wavelet_time:.4f} seconds")
-# print(f"  - Breathing rate: {breathing_rate_wavelet_hz:.3f} Hz ({breathing_rate_wavelet_bpm:.2f} BPM)")
-# print(f"  - Selected level: {wavelet_level}")
 
 # =============================================
 # SUMMARY OF ALL METHODS
