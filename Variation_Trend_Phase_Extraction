@@ -1,0 +1,116 @@
+# ===========================================
+# Variation Trend Method for Phase Extraction with Resampling
+# ===========================================
+
+import numpy as np
+import h5py
+import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
+
+# ---------------------------
+# User Parameters
+# ---------------------------
+fs_desired = 300  # Desired sampling frequency in Hz (input parameter)
+duration_desired = 60  # Desired duration in seconds
+
+# ---------------------------
+# Load radar data
+# ---------------------------
+file_path = r"c:\Users\GOPAL\neurips dataset\ICU TEST\i2.h5"
+
+with h5py.File(file_path, "r") as f:
+    frame = f["sessions/session_0/group_0/entry_0/result/frame"]
+    real_part = np.array(frame["real"], dtype=np.float64)  # Real part
+    imag_part = np.array(frame["imag"], dtype=np.float64)  # Imag part
+
+# Combine into complex IQ data: shape (number of points , sweeps per frame ,total number of frames)
+IQ_data = real_part + 1j * imag_part
+
+IQ_data = IQ_data.transpose(2, 1, 0)  # Shape: (40, 32, 1794)
+print(f"Loaded IQ data shape: {IQ_data.shape}")
+# ---------------------------
+# Parameters
+# ---------------------------
+num_sweeps = IQ_data.shape[2]  # number of time samples (frames)
+original_duration = 60         # original duration in seconds
+original_fs = num_sweeps / original_duration  # original sampling frequency in Hz
+print(f"\nOriginal data parameters:")
+print(f"  - Number of sweeps: {num_sweeps}")
+print(f"  - Duration: {original_duration} s")
+print(f"  - Sampling frequency: {original_fs:.2f} Hz")
+
+print(f"\nDesired output parameters:")
+print(f"  - Duration: {duration_desired} s")
+print(f"  - Sampling frequency: {fs_desired} Hz")
+print(f"  - Number of points: {int(duration_desired * fs_desired)}")
+
+# ---------------------------
+# Range bin selection
+# ---------------------------
+magnitude_data = np.abs(IQ_data)
+mean_magnitude = np.mean(magnitude_data, axis=2)   # Average over time
+peak_range_index = np.argmax(mean_magnitude, axis=1)  # Peak bin per antenna
+
+range_start_bin = max(0, peak_range_index[0] - 5)
+range_end_bin = min(IQ_data.shape[1], peak_range_index[0] + 5)
+range_indices = np.arange(range_start_bin, range_end_bin + 1)
+
+print(f"\nSelected range bins: {range_start_bin} to {range_end_bin}")
+
+# ---------------------------
+# Temporal low-pass filtering
+# ---------------------------
+D = 100                        # Downsampling factor (range bins)
+tau_iq = 0.04                  # Low-pass filter time constant (s)
+f_low = 0.2                    # High-pass filter cutoff (Hz)
+
+downsampled_data = IQ_data[:, range_indices[::D], :]  # keep sweeps intact
+alpha_iq = np.exp(-2 / (tau_iq * original_fs))
+
+filtered_data = np.zeros_like(downsampled_data)
+filtered_data[:, :, 0] = downsampled_data[:, :, 0]
+
+for s in range(1, downsampled_data.shape[2]):
+    filtered_data[:, :, s] = alpha_iq * filtered_data[:, :, s - 1] + \
+                             (1 - alpha_iq) * downsampled_data[:, :, s]
+
+# ---------------------------
+# Phase extraction (variation trend method)
+# ---------------------------
+alpha_phi = np.exp(-2 * f_low / original_fs)
+phi = np.zeros(filtered_data.shape[2])
+
+for s in range(1, filtered_data.shape[2]):
+    z = np.sum(filtered_data[:, :, s] * np.conj(filtered_data[:, :, s - 1]))
+    phi[s] = alpha_phi * phi[s - 1] + np.angle(z)
+
+# Original time vector
+original_t = np.linspace(0, original_duration, len(phi), endpoint=False)
+
+# ---------------------------
+# Resample to desired fs and duration
+# ---------------------------
+# Create interpolation function for the phase signal
+phase_interp = interp1d(original_t, phi, kind='cubic', fill_value="extrapolate")
+
+# Create new time vector
+new_num_samples = int(duration_desired * fs_desired)
+new_t = np.linspace(0, duration_desired, new_num_samples, endpoint=False)
+
+# Resample the phase signal
+resampled_phi = phase_interp(new_t)
+
+# ---------------------------
+# Plot only the resampled signal
+# ---------------------------
+plt.rcParams["font.family"] = "Times New Roman"
+plt.figure(figsize=(12, 6))
+plt.plot(new_t, resampled_phi, linewidth=1.0, color="black")
+plt.xlabel("Time (s)")
+plt.ylabel("Phase (radians)")
+plt.title(f"Resampled Phase Signal\n(fs={fs_desired} Hz, duration={duration_desired} s, {new_num_samples} points)")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+print("\nResampling complete. Plot displayed.")
