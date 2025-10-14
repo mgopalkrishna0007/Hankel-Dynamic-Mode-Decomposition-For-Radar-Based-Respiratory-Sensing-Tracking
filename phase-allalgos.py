@@ -264,46 +264,61 @@ print(f"  - Selected modes: {selected_resp_modes}")
 print(f"  - Mode frequencies: {[f'{frequencies[i]:.3f} Hz' for i in selected_resp_modes]}")
 
 # =============================================
-# 2. EMPIRICAL MODE DECOMPOSITION (EMD)
+# 2. ENSEMBLE EMPIRICAL MODE DECOMPOSITION (EMD)
 # =============================================
 
 print("\n" + "="*50)
 print("2. ENSEMBLE EMPIRICAL MODE DECOMPOSITION (EEMD)")
 print("="*50)
-
 from PyEMD import EEMD
 import numpy as np
 from scipy.signal import welch
 import time
 
-# =========================================================
-# Function to apply EEMD and extract the respiration signal
-# =========================================================
 def extract_respiration_eemd(signal, fs):
     """Apply EEMD and extract the dominant respiration-related IMF"""
+    # ✅ Properly initialize EEMD
     eemd = EEMD()
-    imfs = eemd(signal)
-    
+    eemd.noise_width = 0.2       # add ensemble noise for robustness
+    eemd.trials = 100            # number of ensembles
+    eemd.noise_seed(123)         # reproducibility
+
+    # ✅ Correct call to EEMD decomposition
+    imfs = eemd.eemd(signal)
+
     breathing_freq_range = [0.1, 0.8]  # Hz
     imf_freqs = []
     imf_powers = []
 
     # Compute dominant frequency of each IMF
     for i, imf in enumerate(imfs):
-        freqs, psd = welch(imf, fs=fs, nperseg=min(1024, len(imf)//4))
+        nperseg = max(256, len(imf)//2)   # more stable PSD estimation
+        freqs, psd = welch(imf, fs=fs, nperseg=nperseg)
+
+        if len(freqs) == 0 or np.all(psd == 0):
+            imf_freqs.append(0)
+            imf_powers.append(0)
+            continue
+
         dominant_freq = freqs[np.argmax(psd)]
         imf_freqs.append(dominant_freq)
         
         # Compute power within breathing range
         mask = (freqs >= breathing_freq_range[0]) & (freqs <= breathing_freq_range[1])
-        imf_power = np.trapz(psd[mask], freqs[mask])
+        imf_power = np.trapz(psd[mask], freqs[mask]) if np.any(mask) else 0
         imf_powers.append(imf_power)
 
-    # Find IMF with maximum power in breathing band
-    dominant_imf_index = np.argmax(imf_powers)
+    # ✅ Weighted selection near 0.3 Hz for consistency
+    imf_freqs = np.array(imf_freqs)
+    imf_powers = np.array(imf_powers)
+    target_freq = 0.3
+    score = imf_powers * np.exp(-((imf_freqs - target_freq) ** 2) / 0.1)
+    dominant_imf_index = np.argmax(score)
+
     respiration_signal = imfs[dominant_imf_index]
 
     return respiration_signal, imfs, dominant_imf_index, imf_freqs
+
 
 # Apply EEMD with timing
 start_time = time.time()
@@ -313,7 +328,7 @@ emd_time = time.time() - start_time
 print(f"EEMD extracted {len(imfs_emd)} IMFs")
 
 # Analyze dominant IMF for breathing frequency
-freqs, psd = welch(breathing_emd, fs=fs, nperseg=min(1024, len(breathing_emd)//4))
+freqs, psd = welch(breathing_emd, fs=fs, nperseg=max(256, len(breathing_emd)//2))
 dominant_freq_idx = np.argmax(psd)
 breathing_rate_emd_hz = freqs[dominant_freq_idx]
 breathing_rate_emd_bpm = breathing_rate_emd_hz * 60
